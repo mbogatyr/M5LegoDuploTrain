@@ -161,7 +161,7 @@ partition table and the application in one file, to be written at address
 |---|---|
 | The stick keeps *Searching...* | The train only waits for a connection for a short while after it is switched on: switch it off and on again. Make sure no phone or tablet is connected to it. |
 | The train moves while you hold the stick still | Set your own zero: hold KEY2 for 1.5 s in your usual grip. |
-| The train rolls when the screen says it stands | It was told to brake and is told again a few times during the next 3 s. If it still happens, please open an issue; the `ble` log below shows what was sent. |
+| The train rolls when the screen says it stands, or a stop is silent | Should not happen since commands are paced (see How it works). If it does, please open an issue with the `ble` log (see Development): it shows what was sent and what the train acknowledged. |
 | The screen went dark | The display turns off after 3 minutes without activity; press any key. |
 | No battery level for the train | The train does not report it: it answers neither the battery request nor a subscription to its voltage sensor. |
 | Flashing fails | Hold the power button until the green LED blinks, then flash again. |
@@ -192,12 +192,16 @@ like the other Powered Up hubs.
 
 What was learned on the train:
 
-- **Stopping needs the brake.** Power 0 only lets the motor go: sometimes the
-  train played the brake sound and rolled on. Stops are now sent as the brake
-  (127) and repeated 0.2, 0.6, 1.5 and 3 s later.
-- **No bursts right after connecting.** Setup commands sent back to back were
-  not all handled and the first light colour was lost; they now go out 100 ms
-  apart, and the light colour is repeated like the brake.
+- **One command at a time.** The train carries out only one of two commands
+  written back to back, and drops the other without an error. A stop used to
+  send the brake and the brake sound together, and sometimes the train played
+  the sound and drove on, sometimes it stopped silently; the first light
+  colour after connecting got lost the same way. Every command now waits in
+  a queue and goes out at least 100 ms after the previous one; only the
+  latest command per port waits, so a quick sweep of the tilt sends just the
+  final speed.
+- **Stops are sent as the brake** (127) rather than power 0, which only lets
+  the motor go, and repeated 0.2, 0.6, 1.5 and 3 s later as a safety net.
 - **No battery level**: see Troubleshooting.
 - The train does not move below about 25 % power, so the five levels are
   30, 45, 60, 80 and 100 %.
@@ -210,6 +214,7 @@ lib/        Plain C++ logic, no hardware: tested on the computer
   TrainControls/   running or standing, speed level, sound and light cycles
   TiltThrottle/    accelerometer -> speed level, with zero, dead zone, hysteresis
   ShakeDetector/   a jolt above 2.2 g, at most once per 1.2 s
+  CommandQueue/    one command at a time, 100 ms apart, the latest per port
   Repeats/         when to send a command again (brake, light)
   DisplayTimeout/  display off after 3 minutes without activity
 src/        Everything that knows about the board

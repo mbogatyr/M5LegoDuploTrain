@@ -10,10 +10,11 @@ constexpr uint32_t kConnectTimeoutMs = 5000;
 // before configuring them.
 constexpr uint32_t kSettleMs = 200;
 
-// Between the setup messages, and after the last one. Sent back to back with
-// the first LED colour, they were not all handled: one was acknowledged, one
-// answered with an error, and the colour was lost.
-constexpr uint32_t kSetupGapMs = 100;
+// Between the setup messages, and after the last one, so that the first
+// queued message keeps the gap too. Sent back to back with the first LED
+// colour, they were not all handled: one was acknowledged, one answered with
+// an error, and the colour was lost.
+constexpr uint32_t kSetupGapMs = CommandQueue::kGapMs;
 
 // Read from the NimBLE task too, for messages from the train.
 std::atomic<bool> loggingOn{false};
@@ -76,12 +77,18 @@ void TrainLink::update() {
         }
         break;
 
-    case State::Connected:
+    case State::Connected: {
         if (disconnected_.load() || !client_->isConnected()) {
             Serial.println("Train disconnected");
             startSearching();
+            break;
+        }
+        duplo::Message message;
+        if (queue_.next(millis(), message) && !write(characteristic_, message)) {
+            queue_.retry(message);
         }
         break;
+    }
     }
 }
 
@@ -89,7 +96,8 @@ bool TrainLink::send(const duplo::Message &message) {
     if (state_ != State::Connected || characteristic_ == nullptr) {
         return false;
     }
-    return write(characteristic_, message);
+    queue_.put(message);
+    return true;
 }
 
 void TrainLink::setLogging(bool on) { loggingOn.store(on); }
@@ -121,6 +129,7 @@ void TrainLink::onDisconnect(NimBLEClient *, int reason) {
 void TrainLink::startSearching() {
     state_ = State::Searching;
     characteristic_ = nullptr;
+    queue_.clear();
     found_.store(false);
 
     // 0 scans until stopped; the restart flag clears the duplicate filter,

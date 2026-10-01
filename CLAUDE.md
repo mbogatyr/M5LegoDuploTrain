@@ -64,6 +64,8 @@ The split into `lib/` and `src/` is not cosmetic here, it is load-bearing:
   - `TiltThrottle`: accelerometer readings to a speed level -5..5, with a
     neutral pose, a dead zone and hysteresis.
   - `ShakeDetector`: a jolt above 2.2 g, at most one per 1.2 s.
+  - `CommandQueue`: paces the messages to the train, one at a time and at
+    least 100 ms apart, keeping only the latest one per port.
   - `Repeats`: when to send a command again (the brake after a stop, the
     LED colour after connecting): 0.2, 0.6, 1.5 and 3 s later, then no more.
   - `DisplayTimeout`: turns the display off after 3 minutes without activity.
@@ -120,10 +122,16 @@ constants in `Renderer.cpp`. Check any layout change with a screenshot.
 
 NimBLE calls the scan, disconnect and notification callbacks from its host
 task. `TrainLink` callbacks only store into atomics; connecting, discovering
-the service and writing happen in `TrainLink::update()` and `send()`, called
-from `loop()`. Connecting blocks `loop()` for up to the 5 s connect timeout;
+the service and writing happen in `TrainLink::update()`, called from
+`loop()`. Connecting blocks `loop()` for up to the 5 s connect timeout;
 `update()` first switches to `Connecting` and returns, so the screen shows
 it before the blocking call.
+
+`TrainLink::send()` does not write: it puts the message into a
+`CommandQueue`, and each `update()` writes at most one waiting message, at
+least 100 ms after the previous one (see "One command at a time" below).
+Nothing else may write to the characteristic, except the setup messages in
+`connect()`, which keep the same gap with `delay()`.
 
 ## Controls
 
@@ -195,13 +203,13 @@ Seen on the train with the `ble` log (2026-10-01, hub 34:68:b5:bc:89:9b):
   <port> 01 <type> ...`): motor `0x00` (type `0x29`), speaker `0x01` (`0x2A`),
   LED `0x11` (`0x17`), colour sensor `0x12` (`0x2B`), speedometer `0x13`
   (`0x2C`), voltage `0x14` (`0x14`).
-- **Commands sent back to back right after connecting get lost.** With the
-  two format setups and the first LED colour sent in one burst, the hub
-  acknowledged one setup (`0A 00 47 <port> ...`), answered `05 00 05 47 05`
-  and never acknowledged the colour: the screen showed green while the LED
-  kept its own colour. Sent 100 ms apart, both setups are acknowledged and the
-  colour is too (`05 00 82 11 0A`). The sounds play even when the speaker's
-  setup was the one lost: WriteDirectModeData carries the mode itself.
+- **Commands sent back to back get lost** (see "One command at a time"
+  below). Right after connecting, with the two format setups and the first
+  LED colour sent in one burst, the hub acknowledged one setup (`0A 00 47
+  <port> ...`), answered `05 00 05 47 05` and never acknowledged the colour:
+  the screen showed green while the LED kept its own colour. The sounds play
+  even when the speaker's setup was the one lost: WriteDirectModeData carries
+  the mode itself.
 - Every port output command is answered with `05 00 82 <port> 0A` (idle,
   command completed).
 - **The train does not report its battery.** It answers neither the battery
@@ -215,16 +223,31 @@ Seen on the train with the `ble` log (2026-10-01, hub 34:68:b5:bc:89:9b):
 
 Known from Legoino: the train stops by itself when it is lifted or held.
 
-Stopping. The first firmware stopped the train with power 0, and sometimes
-the train played the brake sound and drove on, while the screen said it was
-standing. Not known whether the command was lost or the train, rolling on
-with a free motor, took that for a push (push-and-go is how a DUPLO train
-starts without an app). Since then (2026-10-01) every zero power, the KEY1
-stop and level 0 while running alike, goes out as the brake (127, as Legoino
-stops the DUPLO motor; the train acknowledges it like any power); `Repeats`
-sends it again 0.2, 0.6, 1.5 and 3 s after the stop and then lets the train
-be, so that it can still fall asleep when idle; and a motor write that NimBLE
-refuses is retried on the next tick and logged as `Write failed`.
+### One command at a time
+
+**The train carries out only one of two commands written back to back.** A
+KEY1 stop used to write the brake and the brake sound in the same
+millisecond; the `ble` log of 2026-10-01 shows the hub acknowledging only one
+of them in four stops out of five (`05 00 82 01 0A` for the sound, nothing
+for the motor), with no error for the other. That was the cause of both
+stopping bugs: first the train played the brake sound and drove on (the
+brake was lost), later it stopped silently (the sound was lost). The lost
+first LED colour after connecting was the same thing. Commands 44 ms apart
+were both acknowledged.
+
+So every message goes through `CommandQueue` (100 ms apart, the latest per
+port, motor before speaker before LED); a stop now writes the brake and the
+sound about 110 ms apart. Checked on the train the same day: 17 stops in a
+row, every one with both commands acknowledged, no errors, no failed writes,
+and no two writes closer than 109 ms.
+
+Kept from before the cause was known, as a safety net: every zero power (the
+KEY1 stop and level 0 while running alike) goes out as the brake (127, as
+Legoino stops the DUPLO motor) rather than 0, which only lets the motor go;
+`Repeats` sends the brake again 0.2, 0.6, 1.5 and 3 s after a stop and then
+lets the train be, so that it can still fall asleep when idle; and a write
+that NimBLE refuses (logged as `Write failed`) goes back into the queue
+unless a newer message for its port is waiting.
 
 `TrainLink::update()` runs first in `loop()`, before the time is taken:
 connecting blocks for a while, and a time taken before it is earlier than
@@ -292,6 +315,16 @@ UIFlow2.0, are full images. Each has the bootloader at 0x0 (header
 `e9 03 02 3f`), the partition table at 0x8000 (`aa 50`) and the application at
 0x10000. One firmware was uploaded as a bare application. The merged image was
 tested on the board: flashed on its own, at address 0x0, with esptool.
+
+Published here: v1.0.0 uploaded on 2026-10-01 as "Lego Duplo Train R/C",
+category Robotics & Control, device StickS3, Public (pending review at the
+time), cover `docs/images/banner.jpeg`. Before the upload the merged image was
+checked on this board: `erase_flash`, then only `firmware-merged.bin` written
+at 0x0 with esptool; the stick booted, showed the splash screen and connected
+to the train. The site's cover editor frames the image at about 16:9, so the
+4:3 banner needs its Crop slider raised to fill the frame. The form needs a
+logged-in account and real file uploads: done in the user's Chrome (Claude in
+Chrome), the built-in browser pane cannot attach files.
 
 The upload form is at burner.m5stack.com/developer/firmware/upload. It asks for:
 - a name, a category and the supported devices (StickS3);

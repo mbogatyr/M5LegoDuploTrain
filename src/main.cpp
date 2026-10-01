@@ -45,11 +45,6 @@ bool displayAwake = true;
 bool splash = true;
 TrainLink::State previousLink = TrainLink::State::Searching;
 
-// The last motor command, and whether it still has to go out: a write that
-// failed is tried again on the next tick.
-int motorPower = 0;
-bool motorPending = false;
-
 const char *toast = nullptr;
 uint32_t toastSinceMs = 0;
 
@@ -92,13 +87,8 @@ void showToast(const char *text, uint32_t now) {
 
 // Zero power goes out as the brake: merely letting the motor go leaves the
 // train rolling.
-bool writeMotor(int power) {
-    return train.send(power == 0 ? duplo::motorBrake() : duplo::motorPower(power));
-}
-
 void sendMotor(int power, uint32_t now) {
-    motorPower = power;
-    motorPending = !writeMotor(power);
+    train.send(power == 0 ? duplo::motorBrake() : duplo::motorPower(power));
     if (power == 0) {
         brakeRepeats.start(now);
     } else {
@@ -106,13 +96,12 @@ void sendMotor(int power, uint32_t now) {
     }
 }
 
-// Keeps the train in line with the screen: retries a failed motor write,
-// repeats the brake after a stop and the LED colour after connecting.
+// Keeps the train in line with the screen: repeats the brake after a stop
+// and the LED colour after connecting. (A failed write is retried by
+// TrainLink's queue.)
 void maintainTrain(uint32_t now) {
-    if (motorPending) {
-        motorPending = !writeMotor(motorPower);
-    } else if (brakeRepeats.due(now)) {
-        writeMotor(0);
+    if (brakeRepeats.due(now)) {
+        train.send(duplo::motorBrake());
     }
     if (lightRepeats.due(now)) {
         train.send(duplo::ledColor(controls.lightColor()));
@@ -139,8 +128,6 @@ void send(const TrainControls::Command &command, uint32_t now) {
 // is not moving any more either.
 void onLinkChanged(TrainLink::State state, uint32_t now) {
     controls.reset();
-    motorPower = 0;
-    motorPending = false;
     brakeRepeats.cancel();
     lightRepeats.cancel();
     if (state == TrainLink::State::Connected) {
